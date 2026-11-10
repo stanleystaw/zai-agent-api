@@ -7,7 +7,7 @@
  */
 'use strict';
 
-require('dotenv').config();
+try { require('dotenv').config(); } catch (_) { /* dotenv optionnel */ }
 const path = require('path');
 const { chromium } = require('playwright');
 

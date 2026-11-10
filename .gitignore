@@ -1,0 +1,6 @@
+node_modules/
+.env
+worker/.env
+worker/worker-profile/
+.vercel
+*.log
