@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.local
+worker/.env
+worker-profile/
+.vercel
+*.log
+.DS_Store
+tests/.tmp

@@ -1,0 +1,22 @@
+{
+  "name": "zai-agent-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API agentique REST pour GLM (chat.z.ai) — conversation persistante, jobs asynchrones, aucun navigateur côté serveur",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node dev-server.js",
+    "test": "node tests/run.js",
+    "worker": "node worker/index.js",
+    "worker:dry": "DRY_RUN=1 node worker/index.js",
+    "setup": "node worker/setup.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10"
+  },
+  "devDependencies": {
+    "playwright": "^1.65.0"
+  }
+}
