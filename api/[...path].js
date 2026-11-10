@@ -285,6 +285,24 @@ module.exports = async function handler(req, res) {
     return fail(res, 404, 'not_found', 'Route worker inconnue.');
   }
 
+  // ── index public ─────────────────────────────────────────────
+  if (!seg.length) {
+    return ok(res, {
+      name: 'GLM Agent API', version: '1.0.0', storage: useKv ? 'kv' : 'memory',
+      endpoints: [
+        'GET /api/v1/health',
+        'GET|POST /api/v1/conversations',
+        'GET|PATCH|DELETE /api/v1/conversations/:id',
+        'GET|POST /api/v1/conversations/:id/messages',
+        'GET|POST /api/v1/jobs',
+        'GET|DELETE /api/v1/jobs/:id',
+        'POST /api/v1/worker/claim',
+        'POST /api/v1/worker/complete',
+      ],
+      auth: 'Authorization: Bearer <API_KEY>',
+    });
+  }
+
   // ── auth client ──────────────────────────────────────────────
   const a = authClient(req);
   if (!a.ok) return fail(res, 401, 'unauthorized', a.reason);
@@ -470,24 +488,6 @@ module.exports = async function handler(req, res) {
       return ok(res, jobView(job));
     }
     return fail(res, 405, 'method_not_allowed', 'Utilise GET ou DELETE.');
-  }
-
-  // ── index ────────────────────────────────────────────────────
-  if (!seg.length) {
-    return ok(res, {
-      name: 'GLM Agent API', version: '1.0.0', storage: useKv ? 'kv' : 'memory',
-      endpoints: [
-        'GET /api/v1/health',
-        'GET|POST /api/v1/conversations',
-        'GET|PATCH|DELETE /api/v1/conversations/:id',
-        'GET|POST /api/v1/conversations/:id/messages',
-        'GET|POST /api/v1/jobs',
-        'GET|DELETE /api/v1/jobs/:id',
-        'POST /api/v1/worker/claim',
-        'POST /api/v1/worker/complete',
-      ],
-      auth: 'Authorization: Bearer <API_KEY>',
-    });
   }
 
   return fail(res, 404, 'not_found', 'Route inconnue : /' + seg.join('/'));

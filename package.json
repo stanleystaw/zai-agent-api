@@ -1,6 +1,13 @@
 {
-  "name": "zai-agent-api-single",
+  "name": "zai-agent-api",
   "version": "1.0.0",
   "private": true,
-  "engines": { "node": ">=20" }
+  "description": "API agentique pour GLM (chat.z.ai) — conversations persistantes, jobs asynchrones, worker Chromium",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "PORT=10000 node server.js"
+  }
 }
