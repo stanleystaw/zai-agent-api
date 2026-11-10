@@ -1,31 +1,38 @@
 /**
  * worker/setup.js — à lancer UNE fois pour valider le captcha Z.ai
  *
- *   node worker/setup.js
+ *   node setup.js
  *
- * Ouvre un Chromium VISIBLE, tu glisses le captcha, tu envoies un message,
- * la session est enregistrée dans worker-profile/ et le worker la réutilisera.
+ * Ouvre un Chromium visible, tu glisses le curseur, tu envoies un message.
+ * La session est enregistrée dans worker-profile/ et réutilisée ensuite.
  */
 'use strict';
 
 require('dotenv').config();
 const path = require('path');
-const { GLMDriver } = require('./glm-driver');
+const { chromium } = require('playwright');
 
-const PROFILE = process.env.GLM_PROFILE_DIR || path.join(__dirname, '..', 'worker-profile');
+const PROFILE = process.env.GLM_PROFILE_DIR || path.join(__dirname, 'worker-profile');
 const CHAT = process.env.ZAI_CHAT_URL || 'https://chat.z.ai/';
 
 (async () => {
   console.log('\n╭───────────────────────────────────────────────╮');
   console.log('│  Validation du captcha Z.ai (une seule fois)  │');
   console.log('╰───────────────────────────────────────────────╯\n');
-  console.log(`Profil : ${PROFILE}\n`);
+  console.log('Profil : ' + PROFILE + '\n');
   console.log('1. Une fenêtre Chromium va s\'ouvrir.');
   console.log('2. Glisse le curseur du puzzle si demandé.');
   console.log('3. Envoie « bonjour » et attends la réponse.\n');
 
-  const driver = new GLMDriver({ profileDir: PROFILE, headless: false, chatUrl: CHAT });
-  await driver.start();
+  const ctx = await chromium.launchPersistentContext(PROFILE, {
+    headless: false,
+    locale: 'fr-FR',
+    viewport: { width: 1440, height: 960 },
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+  });
+  const page = ctx.pages()[0] || (await ctx.newPage());
+  await page.goto(CHAT, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForSelector('#chat-input', { state: 'attached', timeout: 60000 });
 
   console.log('Fenêtre ouverte — en attente d\'une réponse de GLM (10 min max)…\n');
 
@@ -34,15 +41,16 @@ const CHAT = process.env.ZAI_CHAT_URL || 'https://chat.z.ai/';
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 3000));
-    if (await driver.captchaPresent()) {
-      console.log('   … captcha toujours affiché, glisse le curseur.');
+    const body = await page.innerText('body').catch(() => '');
+    if (/security verification|drag the slider/i.test(body)) {
+      console.log('   … captcha affiché, glisse le curseur dans la fenêtre.');
       continue;
     }
-    const count = await driver.page.locator('.chat-assistant').count();
-    if (count > 0) {
-      const text = (await driver.page.locator('.chat-assistant').last().innerText()).trim();
+    const n = await page.locator('.chat-assistant').count();
+    if (n > 0) {
+      const text = (await page.locator('.chat-assistant').last().innerText()).trim();
       if (text.length > 5) {
-        console.log(`\n✅ Réponse détectée (${text.length} car.) :\n\n${text.slice(0, 300)}\n`);
+        console.log('\n✅ Réponse détectée (' + text.length + ' car.) :\n\n' + text.slice(0, 300) + '\n');
         detected = true;
         break;
       }
@@ -50,10 +58,10 @@ const CHAT = process.env.ZAI_CHAT_URL || 'https://chat.z.ai/';
   }
 
   await new Promise((r) => setTimeout(r, 1500));
-  await driver.close();
+  await ctx.close();
 
   if (detected) {
-    console.log('✅ Session enregistrée. Tu peux lancer le worker :\n\n   node worker/index.js\n');
+    console.log('✅ Session enregistrée. Lance maintenant :\n\n   node index.js\n');
   } else {
     console.log('⚠️  Aucune réponse détectée. Relance et valide bien le captcha.');
     process.exitCode = 1;

@@ -1,90 +1,165 @@
 /**
- * worker/index.js — le worker qui exécute les tâches sur chat.z.ai
+ * worker/index.js — exécute les tâches sur chat.z.ai via Chromium
  *
- *   API_BASE=https://ton-api.vercel.app
- *   WORKER_TOKEN=le-même-que-sur-vercel
- *   node worker/index.js
- *
- * Boucle :
- *   1. POST /api/v1/worker/claim  → récupère une tâche (ou 204)
- *   2. exécute dans Chromium
- *   3. POST /api/v1/worker/complete → renvoie la réponse
+ *   cp .env.example .env      (API_BASE + WORKER_TOKEN)
+ *   node setup.js             (une fois : captcha)
+ *   node index.js             (démarre le worker)
  */
 'use strict';
 
 require('dotenv').config();
 const path = require('path');
-const { GLMDriver } = require('./glm-driver');
+const { chromium } = require('playwright');
 
 const API_BASE = (process.env.API_BASE || 'http://localhost:3000').replace(/\/+$/, '');
 const WORKER_TOKEN = process.env.WORKER_TOKEN || '';
 const POLL_MS = Number(process.env.WORKER_POLL_MS || 3000);
-const PROFILE = process.env.GLM_PROFILE_DIR || path.join(__dirname, '..', 'worker-profile');
+const PROFILE = process.env.GLM_PROFILE_DIR || path.join(__dirname, 'worker-profile');
 const HEADLESS = process.env.HEADLESS !== '0';
 const DRY = process.env.DRY_RUN === '1';
+const TIMEOUT = Number(process.env.ANSWER_TIMEOUT_MS || 180000);
 
-const t = () => new Date().toLocaleTimeString('fr-FR', { hour12: false });
-const log = {
-  info: (m) => console.log(`${t()} · ${m}`),
-  ok: (m) => console.log(`${t()} ✅ ${m}`),
-  warn: (m) => console.log(`${t()} ⚠️  ${m}`),
-  err: (m) => console.log(`${t()} ❌ ${m}`),
+const SEL = {
+  input: '#chat-input',
+  assistant: '.chat-assistant',
+  user: '.chat-user',
+  prose: '.markdown-prose, .prose',
 };
 
-function headers() {
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${WORKER_TOKEN}`,
-  };
-}
+const ts = () => new Date().toLocaleTimeString('fr-FR', { hour12: false });
+const log = {
+  info: (m) => console.log(ts() + ' · ' + m),
+  ok: (m) => console.log(ts() + ' ✅ ' + m),
+  warn: (m) => console.log(ts() + ' ⚠️  ' + m),
+  err: (m) => console.log(ts() + ' ❌ ' + m),
+};
 
-async function claim() {
-  const res = await fetch(`${API_BASE}/api/v1/worker/claim`, { method: 'POST', headers: headers() });
-  if (res.status === 204) return null;
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`claim ${res.status} : ${text.slice(0, 200)}`);
-  }
-  return res.json();
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function complete(payload) {
-  const res = await fetch(`${API_BASE}/api/v1/worker/complete`, {
+async function api(path2, body) {
+  const res = await fetch(API_BASE + path2, {
     method: 'POST',
-    headers: headers(),
-    body: JSON.stringify(payload),
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + WORKER_TOKEN },
+    body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 204) return null;
   const text = await res.text();
-  if (!res.ok) throw new Error(`complete ${res.status} : ${text.slice(0, 200)}`);
+  if (!res.ok) throw new Error(path2 + ' ' + res.status + ' : ' + text.slice(0, 200));
   return JSON.parse(text);
 }
 
-async function main() {
+async function captchaPresent(page) {
+  try {
+    const body = await page.innerText('body');
+    return /security verification|drag the slider to complete the puzzle|complete verification/i.test(body);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function openChat(page, url) {
+  const target = url || process.env.ZAI_CHAT_URL || 'https://chat.z.ai/';
+  for (let i = 1; i <= 3; i++) {
+    try {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.waitForSelector(SEL.input, { state: 'attached', timeout: 45000 });
+      await page.waitForTimeout(1500);
+      return target;
+    } catch (e) {
+      if (i === 3) throw e;
+      await page.waitForTimeout(2500);
+    }
+  }
+}
+
+async function ask(page, prompt) {
+  const t0 = Date.now();
+  const before = await page.locator(SEL.assistant).count();
+
+  const box = page.locator(SEL.input);
+  await box.click();
+  await box.fill(prompt);
+  await page.waitForTimeout(250);
+  await box.press('Enter');
+  await page.waitForTimeout(1200);
+
+  if ((await page.locator(SEL.user).count()) === 0) {
+    for (const sel of ['#send-message-button', 'button[type="submit"]', 'button[aria-label*="Send" i]']) {
+      const btn = page.locator(sel).last();
+      if ((await btn.count()) && (await btn.isVisible())) { await btn.click({ timeout: 5000 }); break; }
+    }
+  }
+
+  for (let i = 0; i < 4; i++) {
+    await page.waitForTimeout(1500);
+    if (await captchaPresent(page)) {
+      throw new Error('CAPTCHA Z.ai : validation humaine requise. Lance « node setup.js » une fois, puis relance le worker.');
+    }
+  }
+
+  const deadline = Date.now() + TIMEOUT;
+  let last = '';
+  let stable = 0;
+
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(1200);
+    if (await captchaPresent(page)) throw new Error('CAPTCHA Z.ai déclenché pendant la génération.');
+
+    const n = await page.locator(SEL.assistant).count();
+    if (n <= before) continue;
+
+    const bubble = page.locator(SEL.assistant).last();
+    let text = '';
+    try {
+      const prose = bubble.locator(SEL.prose).last();
+      text = (await prose.count()) ? await prose.innerText() : await bubble.innerText();
+    } catch (_) { text = ''; }
+    text = (text || '').trim();
+
+    if (text && text === last) {
+      stable++;
+      if (stable >= 2) break;
+    } else {
+      stable = 0;
+    }
+    last = text || last;
+  }
+
+  if (!last) throw new Error('Aucune réponse de GLM dans le délai imparti.');
+
+  const clean = last.replace(/^Copy\s*$/gim, '').replace(/^Edit\s*$/gim, '').replace(/\u200b/g, '').trim();
+  return { answer: clean, durationMs: Date.now() - t0, zaiUrl: page.url() };
+}
+
+(async () => {
   if (!WORKER_TOKEN) {
-    log.err('WORKER_TOKEN manquant. Ajoute-le dans worker/.env');
+    log.err('WORKER_TOKEN manquant — copie worker/.env.example en worker/.env');
     process.exit(1);
   }
-  if (!process.env.DRY_RUN) {
-    /* rien */
+
+  log.info('Worker démarré — API : ' + API_BASE);
+  log.info('Profil Chromium : ' + PROFILE);
+
+  const ctx = await chromium.launchPersistentContext(PROFILE, {
+    headless: HEADLESS,
+    locale: 'fr-FR',
+    viewport: { width: 1440, height: 960 },
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+  });
+  const page = ctx.pages()[0] || (await ctx.newPage());
+  page.setDefaultTimeout(30000);
+  await openChat(page, null);
+  log.ok('Navigateur prêt.' + (DRY ? ' (mode DRY RUN)' : ''));
+
+  if (await captchaPresent(page)) {
+    log.warn('Captcha présent : lance « node setup.js » une fois pour le valider.');
   }
 
-  log.info(`Worker démarré — API : ${API_BASE}`);
-  log.info(`Profil Chromium : ${PROFILE}`);
-
-  const driver = new GLMDriver({ profileDir: PROFILE, headless: HEADLESS });
-  await driver.start();
-  log.ok('Navigateur prêt.');
-
-  if (await driver.captchaPresent()) {
-    log.warn('Captcha présent : lance « node worker/setup.js » une fois pour le valider.');
-  }
-
-  let idleRounds = 0;
-  // Boucle infinie volontaire : le worker est un démon.
+  let idle = 0;
   for (;;) {
     let task = null;
     try {
-      task = await claim();
+      task = await api('/api/v1/worker/claim');
     } catch (e) {
       log.err(e.message);
       await sleep(POLL_MS * 2);
@@ -92,66 +167,48 @@ async function main() {
     }
 
     if (!task) {
-      idleRounds++;
-      if (idleRounds % 20 === 0) log.info(`Aucune tâche (${idleRounds * (POLL_MS / 1000)} s d'attente).`);
+      idle++;
+      if (idle % 20 === 0) log.info('Aucune tâche (' + Math.round((idle * POLL_MS) / 1000) + ' s d\'attente).');
       await sleep(POLL_MS);
       continue;
     }
-    idleRounds = 0;
+    idle = 0;
 
-    const { job, conversation } = task;
-    log.info(`Tâche ${job.id} · conversation ${conversation.id} · ${String(job.prompt).slice(0, 70)}…`);
+    const job = task.job;
+    log.info('Tâche ' + job.id + ' · ' + String(job.prompt).slice(0, 70));
 
     try {
-      // Reprise d'une conversation Z.ai existante si elle est fournie
-      if (job.zaiUrl) {
-        log.info(`Ouverture de la conversation existante : ${job.zaiUrl}`);
-        await driver.open(job.zaiUrl);
-      } else {
-        await driver.open(null);
-      }
+      await openChat(page, job.zaiUrl || null);
 
       if (DRY) {
-        await complete({
+        await api('/api/v1/worker/complete', {
           jobId: job.id,
-          answer: `[DRY RUN] Le worker a bien reçu : « ${job.prompt} »`,
+          answer: '[DRY RUN] reçu : ' + job.prompt,
           model: 'dry-run',
           durationMs: 1,
         });
-        log.ok('DRY RUN — réponse simulée envoyée.');
+        log.ok('Réponse simulée envoyée.');
         continue;
       }
 
-      const result = await driver.ask(job.composedPrompt || job.prompt);
-      await complete({
+      const r = await ask(page, job.composedPrompt || job.prompt);
+      await api('/api/v1/worker/complete', {
         jobId: job.id,
-        answer: result.answer,
-        model: null,
-        durationMs: result.durationMs,
-        zaiUrl: result.zaiUrl,
+        answer: r.answer,
+        durationMs: r.durationMs,
+        zaiUrl: r.zaiUrl,
       });
-      log.ok(`Terminé en ${(result.durationMs / 1000).toFixed(1)} s — ${result.answer.length} car.`);
+      log.ok('Terminé en ' + (r.durationMs / 1000).toFixed(1) + ' s — ' + r.answer.length + ' car.');
     } catch (e) {
-      log.err(`Tâche ${job.id} : ${e.message}`);
+      log.err('Tâche ' + job.id + ' : ' + e.message);
       try {
-        await complete({ jobId: job.id, error: e.message });
+        await api('/api/v1/worker/complete', { jobId: job.id, error: e.message });
       } catch (e2) {
-        log.err(`Impossible de signaler l'échec : ${e2.message}`);
+        log.err('Signalement impossible : ' + e2.message);
       }
     }
   }
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-process.on('SIGINT', async () => {
-  log.warn('Arrêt du worker.');
-  process.exit(0);
-});
-
-main().catch((e) => {
+})().catch((e) => {
   log.err(e.message);
   process.exit(1);
 });
