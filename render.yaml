@@ -1,0 +1,31 @@
+# Blueprint Render — déploiement en un clic depuis le dépôt
+services:
+  - type: web
+    name: zai-agent-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: API_KEYS
+        generateValue: true
+      - key: WORKER_TOKEN
+        generateValue: true
+      - key: WORKER_ENABLED
+        value: "1"
+      - key: HEADLESS
+        value: "1"
+      - key: SYNC_WAIT_MS
+        value: "60000"
+      - key: GLM_PROFILE_DIR
+        value: /data/profile
+      - key: KV_REST_API_URL
+        sync: false
+      - key: KV_REST_API_TOKEN
+        sync: false
+    disk:
+      name: glm-session
+      mountPath: /data
+      sizeGB: 1
